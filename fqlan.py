@@ -12,6 +12,7 @@ import binascii
 import select
 import json
 import random
+import contextlib
 
 import gevent.monkey
 import dpkt
@@ -43,6 +44,7 @@ def main():
     argument_parser.add_argument('--ip-command')
     sub_parsers = argument_parser.add_subparsers()
     scan_parser = sub_parsers.add_parser('scan', help='scan LAN devices')
+    scan_parser.add_argument('--hostname', action='store_true')
     scan_parser.add_argument('ip', help='ipv4 address', nargs='+')
     scan_parser.set_defaults(handler=scan)
     forge_parser = sub_parsers.add_parser('forge', help='forge the mac of ip')
@@ -78,7 +80,7 @@ def forge(victim, from_ip, from_mac, to_ip, to_mac):
     for i in range(3):
         try:
             sock = socket.socket(socket.PF_PACKET, socket.SOCK_RAW)
-            try:
+            with contextlib.closing(sock):
                 sock.bind((LAN_INTERFACE, dpkt.ethernet.ETH_TYPE_ARP))
                 from_ip = from_ip or get_default_gateway()
                 from_mac = from_mac or arping(my_ip, my_mac, from_ip)
@@ -89,8 +91,6 @@ def forge(victim, from_ip, from_mac, to_ip, to_mac):
                         LOGGER.info('forge victim %s %s' % (victim_ip, victim_mac))
                         send_forged_arp(sock, victim_ip, victim_mac, from_ip, from_mac, to_mac)
                     gevent.sleep(5)
-            finally:
-                sock.close()
             return True
         except:
             LOGGER.exception('failed to send forged default gateway, retry in 10 seconds')
@@ -126,18 +126,50 @@ def send_forged_arp(sock, victim_ip, victim_mac, from_ip, from_mac, to_mac):
     sock.send(str(eth))
 
 
-def scan(ip):
+def scan(ip, hostname):
     my_ip, my_mac = get_ip_and_mac()
     if not my_ip:
         return
     if not my_mac:
         return
     LOGGER.info('scan %s' % ip)
+    greenlets = []
+    default_gateway = get_default_gateway() if hostname else None
     for found_ip, found_mac in arping_list(my_ip, my_mac, list_ip(ip)):
-        sys.stderr.write(json.dumps([found_ip, found_mac]))
-        sys.stderr.write('\n')
+        if hostname:
+            greenlets.append(gevent.spawn(resolve_hostname, default_gateway, found_ip, found_mac))
+        else:
+            sys.stderr.write(json.dumps([found_ip, found_mac]))
+            sys.stderr.write('\n')
+    if hostname:
+        for greenlet in greenlets:
+            sys.stderr.write(json.dumps(list(greenlet.get())))
+            sys.stderr.write('\n')
     LOGGER.info('scan %s completed' % ip)
 
+
+def resolve_hostname(default_gateway, ip, mac):
+    sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
+    with contextlib.closing(sock):
+        sock.setblocking(0)
+        domain = '%s.in-addr.arpa' % ('.'.join(reversed(ip.split('.'))))
+        request = dpkt.dns.DNS(id=get_transaction_id(), qd=[dpkt.dns.DNS.Q(name=domain, type=dpkt.dns.DNS_PTR)])
+        sock.sendto(str(request), (default_gateway, 53))
+        ins, outs, errors = select.select([sock], [], [sock], timeout=1)
+        if errors:
+            raise Exception('socket error: %s' % errors)
+        if sock in ins:
+            response = dpkt.dns.DNS(sock.recv(8192))
+            if response.an:
+                hostname = response.an[0].rdata
+                hostname, _, _ = hostname.partition('\x03')
+                hostname = ''.join(e for e in hostname if e.isalnum() or e in ['.', '-'])
+                return ip, mac, hostname
+        return ip, mac, ''
+
+
+def get_transaction_id():
+    return random.randint(1, 65535)
 
 def arping(my_ip, my_mac, ip):
     if not ip:
@@ -150,7 +182,7 @@ def arping(my_ip, my_mac, ip):
 
 def arping_list(my_ip, my_mac, ip_list):
     sock = socket.socket(socket.PF_PACKET, socket.SOCK_RAW)
-    try:
+    with contextlib.closing(sock):
         sock.bind((LAN_INTERFACE, dpkt.ethernet.ETH_TYPE_ARP))
         for ip in ip_list:
             send_arp_request(sock, my_mac, my_ip, ip)
@@ -169,8 +201,6 @@ def arping_list(my_ip, my_mac, ip_list):
                 count += 1
                 if count > 2: # no response for 1 seconds
                     break
-    finally:
-        sock.close()
 
 
 def send_arp_request(sock, my_mac, my_ip, request_ip):
