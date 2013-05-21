@@ -28,7 +28,7 @@ RE_MAC_ADDRESS = re.compile(r'[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:
 RE_DEFAULT_GATEWAY = re.compile(r'default via (\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})')
 ETH_ADDR_BROADCAST = '\xff\xff\xff\xff\xff\xff'
 ETH_ADDR_UNSPEC = '\x00\x00\x00\x00\x00\x00'
-
+SO_MARK = 36
 
 def main():
     global LAN_INTERFACE
@@ -45,6 +45,7 @@ def main():
     sub_parsers = argument_parser.add_subparsers()
     scan_parser = sub_parsers.add_parser('scan', help='scan LAN devices')
     scan_parser.add_argument('--hostname', action='store_true')
+    scan_parser.add_argument('--mark')
     scan_parser.add_argument('ip', help='ipv4 address', nargs='+')
     scan_parser.set_defaults(handler=scan)
     forge_parser = sub_parsers.add_parser('forge', help='forge the mac of ip')
@@ -126,7 +127,7 @@ def send_forged_arp(sock, victim_ip, victim_mac, from_ip, from_mac, to_mac):
     sock.send(str(eth))
 
 
-def scan(ip, hostname):
+def scan(ip, hostname, mark):
     my_ip, my_mac = get_ip_and_mac()
     if not my_ip:
         return
@@ -143,7 +144,7 @@ def scan(ip, hostname):
             LOGGER.info('skip default gateway: %s %s' % (found_ip, found_mac))
             continue
         if hostname:
-            greenlets.append(gevent.spawn(resolve_hostname, default_gateway, found_ip, found_mac))
+            greenlets.append(gevent.spawn(resolve_hostname, mark, default_gateway, found_ip, found_mac))
         else:
             result = [found_ip, found_mac]
             LOGGER.info('found: %s' % result)
@@ -158,9 +159,11 @@ def scan(ip, hostname):
     LOGGER.info('scan %s completed' % ip)
 
 
-def resolve_hostname(default_gateway, ip, mac):
+def resolve_hostname(mark, default_gateway, ip, mac):
     sock = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
     with contextlib.closing(sock):
+        if mark:
+            sock.setsockopt(socket.SOL_SOCKET, SO_MARK, eval(mark))
         sock.setblocking(0)
         domain = '%s.in-addr.arpa' % ('.'.join(reversed(ip.split('.'))))
         request = dpkt.dns.DNS(id=get_transaction_id(), qd=[dpkt.dns.DNS.Q(name=domain, type=dpkt.dns.DNS_PTR)])
