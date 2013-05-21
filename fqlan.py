@@ -65,7 +65,7 @@ def main():
     logging.basicConfig(stream=sys.stdout, level=log_level, format='%(asctime)s %(levelname)s %(message)s')
     if args.log_file:
         handler = logging.handlers.RotatingFileHandler(
-            args.log_file, maxBytes=1024 * 256, backupCount=0)
+            args.log_file, maxBytes=1024 * 32, backupCount=0)
         handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
         handler.setLevel(log_level)
         logging.getLogger('fqlan').addHandler(handler)
