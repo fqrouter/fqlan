@@ -26,9 +26,11 @@ IFCONFIG_COMMAND = None
 RE_IFCONFIG_IP = re.compile(r'inet addr:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})')
 RE_MAC_ADDRESS = re.compile(r'[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+')
 RE_DEFAULT_GATEWAY = re.compile(r'default via (\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})')
+RE_IP_RANGE = re.compile(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d+)')
 ETH_ADDR_BROADCAST = '\xff\xff\xff\xff\xff\xff'
 ETH_ADDR_UNSPEC = '\x00\x00\x00\x00\x00\x00'
 SO_MARK = 36
+
 
 def main():
     global LAN_INTERFACE
@@ -46,7 +48,7 @@ def main():
     scan_parser = sub_parsers.add_parser('scan', help='scan LAN devices')
     scan_parser.add_argument('--hostname', action='store_true')
     scan_parser.add_argument('--mark')
-    scan_parser.add_argument('ip', help='ipv4 address', nargs='+')
+    scan_parser.add_argument('ip', help='ipv4 address', nargs='*')
     scan_parser.set_defaults(handler=scan)
     forge_parser = sub_parsers.add_parser('forge', help='forge the mac of ip')
     forge_parser.add_argument('--from-ip', help='default to the gateway ip')
@@ -133,6 +135,7 @@ def scan(ip, hostname, mark):
         return
     if not my_mac:
         return
+    ip = ip or [get_default_ip_range()]
     LOGGER.info('scan %s' % ip)
     greenlets = []
     default_gateway = get_default_gateway()
@@ -283,20 +286,32 @@ def int_to_ip(ip_as_int):
     return socket.inet_ntoa(struct.pack('!i', ip_as_int))
 
 
+def get_default_ip_range():
+    for line in get_ip_route_output().splitlines():
+        if 'dev %s' % LAN_INTERFACE in line:
+            match = RE_IP_RANGE.search(line)
+            if match:
+                return match.group(0)
+    raise Exception('failed to find default ip range')
+
+
 def get_default_gateway():
-    if IP_COMMAND:
-        output = subprocess.check_output(
-            [IP_COMMAND, 'ip' if 'busybox' in IP_COMMAND else '', 'route'],
-            stderr=subprocess.STDOUT)
-    else:
-        output = subprocess.check_output('ip route', stderr=subprocess.STDOUT, shell=True)
-    for line in output.splitlines():
+    for line in get_ip_route_output().splitlines():
         if 'dev %s' % LAN_INTERFACE not in line:
             continue
         match = RE_DEFAULT_GATEWAY.search(line)
         if match:
             return match.group(1)
     raise Exception('failed to find default gateway')
+
+
+def get_ip_route_output():
+    if IP_COMMAND:
+        return subprocess.check_output(
+            [IP_COMMAND, 'ip' if 'busybox' in IP_COMMAND else '', 'route'],
+            stderr=subprocess.STDOUT)
+    else:
+        return subprocess.check_output('ip route', stderr=subprocess.STDOUT, shell=True)
 
 
 def get_ip_and_mac():
