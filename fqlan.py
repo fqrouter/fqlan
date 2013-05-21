@@ -134,16 +134,26 @@ def scan(ip, hostname):
         return
     LOGGER.info('scan %s' % ip)
     greenlets = []
-    default_gateway = get_default_gateway() if hostname else None
+    default_gateway = get_default_gateway()
     for found_ip, found_mac in arping_list(my_ip, my_mac, list_ip(ip)):
+        if found_ip == my_ip:
+            LOGGER.info('skip my ip: %s %s' % (found_ip, found_mac))
+            continue
+        if found_ip == default_gateway:
+            LOGGER.info('skip default gateway: %s %s' % (found_ip, found_mac))
+            continue
         if hostname:
             greenlets.append(gevent.spawn(resolve_hostname, default_gateway, found_ip, found_mac))
         else:
-            sys.stderr.write(json.dumps([found_ip, found_mac]))
+            result = [found_ip, found_mac]
+            LOGGER.info('found: %s' % result)
+            sys.stderr.write(json.dumps(result))
             sys.stderr.write('\n')
     if hostname:
         for greenlet in greenlets:
-            sys.stderr.write(json.dumps(list(greenlet.get())))
+            result = list(greenlet.get())
+            LOGGER.info('found: %s' % result)
+            sys.stderr.write(json.dumps(result))
             sys.stderr.write('\n')
     LOGGER.info('scan %s completed' % ip)
 
@@ -171,6 +181,7 @@ def resolve_hostname(default_gateway, ip, mac):
 def get_transaction_id():
     return random.randint(1, 65535)
 
+
 def arping(my_ip, my_mac, ip):
     if not ip:
         return None
@@ -194,7 +205,7 @@ def arping_list(my_ip, my_mac, ip_list):
                 raise Exception('socket error: %s' % errors)
             if ins:
                 found_ip, found_mac = receive_arp_reply(ins[0])
-                if my_ip != found_ip and (found_ip, found_mac) not in found_set:
+                if (found_ip, found_mac) not in found_set:
                     found_set.add((found_ip, found_mac))
                     yield (found_ip, found_mac)
             else:
