@@ -177,9 +177,7 @@ def resolve_hostname(mark, default_gateway, ip, mac):
         if sock in ins:
             response = dpkt.dns.DNS(sock.recv(8192))
             if response.an:
-                hostname = response.an[0].rdata
-                hostname, _, _ = hostname.partition('\x03')
-                hostname = ''.join(e for e in hostname if e.isalnum() or e in ['.', '-'])
+                hostname = response.an[0].ptrname
                 return ip, mac, hostname
         return ip, mac, ''
 
