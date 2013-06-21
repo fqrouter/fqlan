@@ -48,6 +48,7 @@ def main():
     scan_parser = sub_parsers.add_parser('scan', help='scan LAN devices')
     scan_parser.add_argument('--hostname', action='store_true')
     scan_parser.add_argument('--mark')
+    scan_parser.add_argument('--factor', default=1)
     scan_parser.add_argument('ip', help='ipv4 address', nargs='*')
     scan_parser.set_defaults(handler=scan)
     forge_parser = sub_parsers.add_parser('forge', help='forge the mac of ip')
@@ -129,7 +130,8 @@ def send_forged_arp(sock, victim_ip, victim_mac, from_ip, from_mac, to_mac):
     sock.send(str(eth))
 
 
-def scan(ip, hostname, mark):
+def scan(ip, hostname, mark, factor):
+    factor = int(factor)
     my_ip, my_mac = get_ip_and_mac()
     if not my_ip:
         return
@@ -139,13 +141,14 @@ def scan(ip, hostname, mark):
     LOGGER.info('scan %s' % ip)
     greenlets = []
     default_gateway = get_default_gateway()
-    for found_ip, found_mac in arping_list(my_ip, my_mac, list_ip(ip)):
+    for found_ip, found_mac in arping_list(my_ip, my_mac, list_ip(ip, factor), factor):
         if found_ip == my_ip:
             LOGGER.info('skip my ip: %s %s' % (found_ip, found_mac))
             continue
         if found_ip == default_gateway:
             LOGGER.info('skip default gateway: %s %s' % (found_ip, found_mac))
             continue
+        LOGGER.info('discovered: %s %s' % (found_ip, found_mac))
         if hostname:
             greenlets.append(gevent.spawn(resolve_hostname, mark, default_gateway, found_ip, found_mac))
         else:
@@ -189,13 +192,13 @@ def get_transaction_id():
 def arping(my_ip, my_mac, ip):
     if not ip:
         return None
-    result = list(arping_list(my_ip, my_mac, [ip]))
+    result = list(arping_list(my_ip, my_mac, [ip], 1))
     if not result:
         raise Exception('mac not found for %s' % ip)
     return result[0][1]
 
 
-def arping_list(my_ip, my_mac, ip_list):
+def arping_list(my_ip, my_mac, ip_list, factor):
     sock = socket.socket(socket.PF_PACKET, socket.SOCK_RAW)
     with contextlib.closing(sock):
         sock.bind((LAN_INTERFACE, dpkt.ethernet.ETH_TYPE_ARP))
@@ -214,7 +217,7 @@ def arping_list(my_ip, my_mac, ip_list):
                     yield (found_ip, found_mac)
             else:
                 count += 1
-                if count > 2: # no response for 1 seconds
+                if count > 2 * factor: # no response for 1 seconds
                     break
 
 
@@ -249,7 +252,7 @@ def eth_ntoa(mac):
     return binascii.hexlify(mac)
 
 
-def list_ip(ip_list):
+def list_ip(ip_list, factor):
     ip_set = set()
     for ip in ip_list:
         if '/' in ip:
@@ -262,7 +265,7 @@ def list_ip(ip_list):
                 ip_set.add(start_ip_as_int + i)
         else:
             ip_set.add(ip_to_int(ip))
-    for j in range(2): # repeat the random scan twice
+    for j in range(2 * factor): # repeat the random scan twice
         ip_list = list(ip_set)
         done = False
         while not done:
