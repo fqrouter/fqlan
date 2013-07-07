@@ -70,12 +70,16 @@ def main():
         handler.setFormatter(logging.Formatter('%(asctime)s %(levelname)s %(message)s'))
         handler.setLevel(log_level)
         logging.getLogger('fqlan').addHandler(handler)
-    args.handler(**{k: getattr(args, k) for k in vars(args) if k not in {
-        'handler', 'log_file', 'log_level', 'lan_interface', 'ifconfig_command', 'ip_command'}})
+    kwargs = {k: getattr(args, k) for k in vars(args) if k not in {
+        'handler', 'log_file', 'log_level', 'lan_interface', 'ifconfig_command', 'ip_command'}}
+    try:
+        args.handler(**kwargs)
+    except:
+        LOGGER.exception('failed to handle: %s %s' % (args.handler, str(kwargs)))
 
 
 def forge(victim, from_ip, from_mac, to_ip, to_mac):
-    LOGGER.info('forge started')
+    LOGGER.info('forge started, victims: %s' % str(victim))
     my_ip, my_mac = get_ip_and_mac()
     to_mac = to_mac or arping(my_ip, my_mac, to_ip)
     if not to_mac:
