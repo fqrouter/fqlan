@@ -27,6 +27,7 @@ RE_IFCONFIG_IP = re.compile(r'inet addr:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})')
 RE_MAC_ADDRESS = re.compile(r'[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+:[0-9a-f]+')
 RE_DEFAULT_GATEWAY = re.compile(r'default via (\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})')
 RE_IP_RANGE = re.compile(r'(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/\d+)')
+RE_DEFAULT_INTERFACE = re.compile(r'dev\s+(.+?)\s+')
 ETH_ADDR_BROADCAST = '\xff\xff\xff\xff\xff\xff'
 ETH_ADDR_UNSPEC = '\x00\x00\x00\x00\x00\x00'
 SO_MARK = 36
@@ -345,6 +346,47 @@ def get_ip_and_mac():
     except:
         LOGGER.exception('failed to get ip and mac')
         return None, None
+
+
+def get_default_interface():
+    for line in get_ip_route_output().splitlines():
+        if 'default via' not in line:
+            continue
+        match = RE_DEFAULT_INTERFACE.search(line)
+        if match:
+            return match.group(1)
+    return None
+
+
+def get_ip_of_interface(interface):
+    if not interface:
+        return None
+    try:
+        if IFCONFIG_COMMAND:
+            output = subprocess.check_output(
+                [IFCONFIG_COMMAND, 'ifconfig' if 'busybox' in IFCONFIG_COMMAND else '', interface],
+                stderr=subprocess.STDOUT)
+        else:
+            output = subprocess.check_output(
+                'ifconfig %s' % get_default_interface(),
+                stderr=subprocess.STDOUT, shell=True)
+        output = output.lower()
+        match = RE_IFCONFIG_IP.search(output)
+        if match:
+            ip = match.group(1)
+        else:
+            ip = None
+        return ip
+    except subprocess.CalledProcessError, e:
+        LOGGER.error('failed to get ip and mac: %s' % e.output)
+        return None, None
+    except:
+        LOGGER.exception('failed to get ip and mac')
+        return None, None
+
+
+def get_default_interface_ip():
+    return get_ip_of_interface(get_default_interface())
 
 
 if '__main__' == __name__:
