@@ -51,7 +51,7 @@ def main():
     scan_parser.add_argument('--mark')
     scan_parser.add_argument('--factor', default=1)
     scan_parser.add_argument('ip', help='ipv4 address', nargs='*')
-    scan_parser.set_defaults(handler=scan)
+    scan_parser.set_defaults(handler=handle_scan)
     forge_parser = sub_parsers.add_parser('forge', help='forge the mac of ip')
     forge_parser.add_argument('--from-ip', help='default to the gateway ip')
     forge_parser.add_argument('--from-mac', help='default to the gateway mac')
@@ -135,18 +135,24 @@ def send_forged_arp(sock, victim_ip, victim_mac, from_ip, from_mac, to_mac):
     sock.send(str(eth))
 
 
-def scan(ip, hostname, mark, factor):
+def handle_scan(ip, hostname, mark, factor):
+    for result in scan(ip, hostname, mark, factor):
+        sys.stderr.write(json.dumps(result))
+        sys.stderr.write('\n')
+
+
+def scan(ip_range=None, should_resolve_hostname=True, mark=None, factor=1):
     factor = int(factor)
     my_ip, my_mac = get_ip_and_mac()
     if not my_ip:
         return
     if not my_mac:
         return
-    ip = ip or [get_default_ip_range()]
-    LOGGER.info('scan %s' % ip)
+    ip_range = ip_range or [get_default_ip_range()]
+    LOGGER.info('scan %s' % ip_range)
     greenlets = []
     default_gateway = get_default_gateway()
-    for found_ip, found_mac in arping_list(my_ip, my_mac, list_ip(ip, factor), factor):
+    for found_ip, found_mac in arping_list(my_ip, my_mac, list_ip(ip_range, factor), factor):
         if found_ip == my_ip:
             LOGGER.info('skip my ip: %s %s' % (found_ip, found_mac))
             continue
@@ -154,20 +160,18 @@ def scan(ip, hostname, mark, factor):
             LOGGER.info('skip default gateway: %s %s' % (found_ip, found_mac))
             continue
         LOGGER.info('discovered: %s %s' % (found_ip, found_mac))
-        if hostname:
+        if should_resolve_hostname:
             greenlets.append(gevent.spawn(resolve_hostname, mark, default_gateway, found_ip, found_mac))
         else:
             result = [found_ip, found_mac]
             LOGGER.info('found: %s' % result)
-            sys.stderr.write(json.dumps(result))
-            sys.stderr.write('\n')
-    if hostname:
+            yield result
+    if should_resolve_hostname:
         for greenlet in greenlets:
             result = list(greenlet.get())
             LOGGER.info('found: %s' % result)
-            sys.stderr.write(json.dumps(result))
-            sys.stderr.write('\n')
-    LOGGER.info('scan %s completed' % ip)
+            yield result
+    LOGGER.info('scan %s completed' % ip_range)
 
 
 def resolve_hostname(mark, default_gateway, ip, mac):
@@ -324,10 +328,10 @@ def get_ip_and_mac():
     try:
         if IFCONFIG_COMMAND:
             output = subprocess.check_output(
-                [IFCONFIG_COMMAND, 'ifconfig' if 'busybox' in IFCONFIG_COMMAND else '', LAN_INTERFACE],
+                [IFCONFIG_COMMAND, 'ifconfig' if 'busybox' in IFCONFIG_COMMAND else '', get_lan_interface()],
                 stderr=subprocess.STDOUT)
         else:
-            output = subprocess.check_output('ifconfig %s' % LAN_INTERFACE, stderr=subprocess.STDOUT, shell=True)
+            output = subprocess.check_output('ifconfig %s' % get_lan_interface(), stderr=subprocess.STDOUT, shell=True)
         output = output.lower()
         match = RE_MAC_ADDRESS.search(output)
         if match:
@@ -346,6 +350,15 @@ def get_ip_and_mac():
     except:
         LOGGER.exception('failed to get ip and mac')
         return None, None
+
+
+def get_lan_interface():
+    global LAN_INTERFACE
+    if LAN_INTERFACE:
+        return LAN_INTERFACE
+    else:
+        LAN_INTERFACE = get_default_interface()
+        return LAN_INTERFACE
 
 
 def get_default_interface():
