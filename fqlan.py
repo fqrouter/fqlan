@@ -79,13 +79,13 @@ def main():
         LOGGER.exception('failed to handle: %s %s' % (args.handler, str(kwargs)))
 
 
-def forge(victim, from_ip, from_mac, to_ip, to_mac):
+def forge(victim, from_ip=None, from_mac=None, to_ip=None, to_mac=None):
     LOGGER.info('forge started, victims: %s' % str(victim))
     my_ip, my_mac = get_ip_and_mac()
     to_mac = to_mac or arping(my_ip, my_mac, to_ip)
     if not to_mac:
         to_ip, to_mac = my_ip, my_mac
-    victims = [v.split(',') for v in victim]
+    victims = [v.split(',') if isinstance(v, basestring) else v for v in victim]
     for i in range(3):
         try:
             sock = socket.socket(socket.PF_PACKET, socket.SOCK_RAW)
@@ -100,6 +100,8 @@ def forge(victim, from_ip, from_mac, to_ip, to_mac):
                         LOGGER.info('forge victim %s %s' % (victim_ip, victim_mac))
                         send_forged_arp(sock, victim_ip, victim_mac, from_ip, from_mac, to_mac)
                     gevent.sleep(5)
+            return True
+        except gevent.GreenletExit:
             return True
         except:
             LOGGER.exception('failed to send forged default gateway, retry in 10 seconds')
