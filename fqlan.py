@@ -99,7 +99,7 @@ def forge(victim, from_ip=None, from_mac=None, to_ip=None, to_mac=None):
                     for victim_ip, victim_mac in victims:
                         LOGGER.info('forge victim %s %s' % (victim_ip, victim_mac))
                         send_forged_arp(sock, victim_ip, victim_mac, from_ip, from_mac, to_mac)
-                    gevent.sleep(5)
+                    gevent.sleep(3)
             return True
         except gevent.GreenletExit:
             return True
